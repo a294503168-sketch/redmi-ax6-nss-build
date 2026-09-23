@@ -118,4 +118,6 @@ if [ "${1:-}" = "shell" ]; then
 fi
 
 log "开始编译"
-exec docker run "${RUN_ARGS[@]}" "$IMAGE_TAG" ./scripts/build.sh "$@"
+# 用 bash 显式解释执行：build.sh 的可执行位一旦在迁移/API 改文件时丢失，
+# 直接 ./scripts/build.sh 会在容器 init 阶段就以 126（permission denied）挂掉。
+exec docker run "${RUN_ARGS[@]}" "$IMAGE_TAG" bash ./scripts/build.sh "$@"
