@@ -73,14 +73,16 @@
  		case AD_MUX_COLLECTING_DISTRIBUTING:
  			port->actor_oper_port_state |= LACP_STATE_COLLECTING;
  			port->actor_oper_port_state |= LACP_STATE_DISTRIBUTING;
-@@ -2066,6 +2124,7 @@ static void ad_enable_collecting_distributing(struct port *port,
- static void ad_enable_collecting_distributing(struct port *port,
+@@ -2066,8 +2124,9 @@ static void ad_enable_collecting_distrib
  					      bool *update_slave_arr)
  {
-+	struct bond_cb *lag_cb_main; /* QCA NSS ECM bonding support */
  	struct aggregator *aggregator = rcu_dereference(port->aggregator);
  
  	if (aggregator->is_active) {
++		struct bond_cb *lag_cb_main; /* QCA NSS ECM bonding support */
+ 		slave_dbg(port->slave->bond->dev, port->slave->dev,
+ 			  "Enabling port %d (LAG %d)\n",
+ 			  port->actor_port_number,
 @@ -2073,6 +2132,16 @@ static void ad_enable_collecting_distrib
  		__enable_port(port);
  		/* Slave array needs update */
@@ -575,7 +577,7 @@
  
  static bool bond_flow_ip(struct sk_buff *skb, struct flow_keys *fk, const void *data,
  			 int hlen, __be16 l2_proto, int *nhoff, int *ip_proto, bool l34)
-@@ -5238,15 +5528,18 @@ static netdev_tx_t bond_3ad_xor_xmit(str
+@@ -5238,17 +5528,20 @@ static netdev_tx_t bond_3ad_xor_xmit(str
  				     struct net_device *dev)
  {
  	struct bonding *bond = netdev_priv(dev);
@@ -600,22 +602,24 @@
 +	/* QCA NSS ECM bonding support - End */
  }
  
- /* in broadcast mode, we send everything to all usable interfaces. */
-@@ -5575,9 +5868,9 @@ static netdev_tx_t __bond_start_xmit(struct sk_buff *skb, struct net_device *dev)
+ /* in broadcast mode, we send everything to all or usable slave interfaces.
+  * under rcu_read_lock when this function is called.
+  */
+@@ -5494,11 +5787,11 @@ static netdev_tx_t __bond_start_xmit(struct sk_buff *skb, struct net_device *dev)
+ 		return bond_xmit_roundrobin(skb, dev);
  	case BOND_MODE_ACTIVEBACKUP:
  		return bond_xmit_activebackup(skb, dev);
--	case BOND_MODE_8023AD:
--		if (bond_should_broadcast_neighbor(skb, dev))
--			return bond_xmit_broadcast(skb, dev, false);
+ 	case BOND_MODE_8023AD:
+ 		if (bond_should_broadcast_neighbor(skb, dev))
+ 			return bond_xmit_broadcast(skb, dev, false);
 -		fallthrough;
 -	case BOND_MODE_XOR:
+-		return bond_3ad_xor_xmit(skb, dev);
++		return bond_3ad_xor_xmit(skb, dev);
 +	case BOND_MODE_XOR:
 +		return bond_xmit_xor(skb, dev); /* QCA NSS ECM bonding support */
-+	case BOND_MODE_8023AD:
-+		if (bond_should_broadcast_neighbor(skb, dev))
-+			return bond_xmit_broadcast(skb, dev, false);
- 		return bond_3ad_xor_xmit(skb, dev);
  	case BOND_MODE_BROADCAST:
+ 		return bond_xmit_broadcast(skb, dev, true);
 --- a/include/net/bond_3ad.h
 +++ b/include/net/bond_3ad.h
 @@ -308,5 +308,11 @@ void bond_3ad_update_lacp_active(struct
