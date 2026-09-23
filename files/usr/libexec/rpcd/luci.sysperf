@@ -1,0 +1,155 @@
+#!/bin/sh
+# rpcd 插件：为 LuCI 首页的「性能监控」面板提供数据
+#
+# 暴露 ubus 对象 luci.sysperf，方法 stats 一次性返回：
+#   cpu[]     —— /proc/stat 的累计 jiffies（busy / idle），占用率由前端做差值算
+#   nss[]     —— NSS UBI32 核心负载，来自 qca-nss-drv 的 debugfs
+#   thermal[] —— 所有 thermal_zone 的温度（毫摄氏度）
+#
+# 之所以把 CPU 的原始计数直接抛给前端，是因为占用率必须由两次采样求差得到。
+# rpcd 每次调用都是独立进程，存不住上次采样；前端每秒调一次，天然有前后两帧。
+
+. /usr/share/libubox/jshn.sh
+
+NSS_STATS="/sys/kernel/debug/qca-nss-drv/stats/cpu_load_ubi"
+
+# debugfs 未挂载时按需挂一次，挂不上就当 NSS 数据不可用
+ensure_debugfs() {
+	[ -e "$NSS_STATS" ] && return 0
+	grep -qs ' /sys/kernel/debug debugfs ' /proc/mounts && return 0
+	mount -t debugfs none /sys/kernel/debug 2>/dev/null
+}
+
+add_cpu() {
+	local name user nice sys idle iowait irq softirq steal rest
+
+	json_add_array "cpu"
+	while read -r name user nice sys idle iowait irq softirq steal rest; do
+		case "$name" in
+			cpu|cpu[0-9]*) ;;
+			*) continue ;;
+		esac
+
+		json_add_object ""
+		json_add_string "name" "$name"
+		# 累计 jiffies 会超过 32 位，jshn 的整数放不下，一律按字符串传
+		json_add_string "busy" "$(( ${user:-0} + ${nice:-0} + ${sys:-0} + ${irq:-0} + ${softirq:-0} + ${steal:-0} ))"
+		json_add_string "idle" "$(( ${idle:-0} + ${iowait:-0} ))"
+		json_close_object
+	done < /proc/stat
+	json_close_array
+}
+
+# cpu_load_ubi 在 25.12-nss 的驱动上是这样的多行格式：
+#   CPU Utilization:
+#   Note: Averaged over 1 second
+#
+#   Core 0:
+#   Min	Avg	Max
+#    3%	 3%	 16%
+#
+# 别的驱动版本会把三个数写在 Core 那一行上。两种都要认，所以：遇到「Core <n>」
+# 就记下当前核心号，遇到带百分数的行就归给它，按出现顺序当 min / avg / max，
+# 只有一个百分数时三者取同一个值。每个核心只取第一组数，避免重复行。
+nss_parse() {
+	awk '
+		{
+			if (match($0, /[Cc]ore[[:space:]]*[0-9]+/)) {
+				idx = substr($0, RSTART, RLENGTH)
+				gsub(/[^0-9]/, "", idx)
+				cur = idx
+				seen = 1
+			}
+
+			n = 0
+			s = $0
+			while (match(s, /[0-9]+[[:space:]]*%/)) {
+				v = substr(s, RSTART, RLENGTH)
+				gsub(/[^0-9]/, "", v)
+				p[++n] = v
+				s = substr(s, RSTART + RLENGTH)
+			}
+
+			if (!seen || n < 1 || done[cur])
+				next
+
+			done[cur] = 1
+
+			if (n >= 3)
+				print cur, p[1], p[2], p[3]
+			else
+				print cur, p[1], p[1], p[1]
+		}
+	' "$NSS_STATS" 2>/dev/null
+}
+
+add_nss() {
+	local parsed line oldifs idx min avg max
+
+	ensure_debugfs
+
+	json_add_array "nss"
+	if [ -r "$NSS_STATS" ]; then
+		parsed="$(nss_parse)"
+		oldifs="$IFS"
+		IFS='
+'
+		for line in $parsed; do
+			IFS="$oldifs"
+			set -- $line
+			idx="$1"; min="$2"; avg="$3"; max="$4"
+			json_add_object ""
+			json_add_int "core" "${idx:-0}"
+			json_add_int "min" "${min:-0}"
+			json_add_int "avg" "${avg:-0}"
+			json_add_int "max" "${max:-0}"
+			json_close_object
+			IFS='
+'
+		done
+		IFS="$oldifs"
+	fi
+	json_close_array
+}
+
+add_thermal() {
+	local zone ztype temp
+
+	json_add_array "thermal"
+	for zone in /sys/class/thermal/thermal_zone*; do
+		[ -r "$zone/temp" ] || continue
+		read -r temp < "$zone/temp" 2>/dev/null || continue
+		read -r ztype < "$zone/type" 2>/dev/null || ztype="${zone##*/}"
+		# 传感器掉线时内核返回负值，直接丢掉
+		[ "${temp:-0}" -gt 0 ] 2>/dev/null || continue
+
+		json_add_object ""
+		json_add_string "type" "$ztype"
+		json_add_int "temp" "$temp"
+		json_close_object
+	done
+	json_close_array
+}
+
+stats() {
+	json_init
+	add_cpu
+	add_nss
+	add_thermal
+	json_dump
+}
+
+case "$1" in
+	list)
+		json_init
+		json_add_object "stats"
+		json_close_object
+		json_dump
+	;;
+	call)
+		case "$2" in
+			stats) stats ;;
+			*) echo '{}' ;;
+		esac
+	;;
+esac

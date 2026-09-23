@@ -1,0 +1,10 @@
+{
+	"luci-sysperf": {
+		"description": "读取 CPU / NSS / 温度状态",
+		"read": {
+			"ubus": {
+				"luci.sysperf": [ "stats" ]
+			}
+		}
+	}
+}

@@ -1,0 +1,169 @@
+name: Build Redmi AX6 Firmware (NSS)
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'config/**'
+      - 'files/**'
+      - 'scripts/**'
+      - 'docker/**'
+      - '.github/workflows/build.yml'
+  # 每天 04:00（北京时间）查一次上游源码树，有新提交才编译
+  schedule:
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+    inputs:
+      repo_branch:
+        description: '源码分支（留空用 config/ax6.conf 的值，可填 24.10-nss）'
+        required: false
+        default: ''
+      create_release:
+        description: '是否创建 Release'
+        type: boolean
+        required: false
+        default: true
+      force_build:
+        description: '上游没更新也强制编译'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+# 同一分支同时只跑一份，避免定时任务和 push 撞车
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # 先用 git ls-remote 拿上游 HEAD，再看有没有对应的 Release。
+  # Release 的 tag 就是 nss-<上游短 sha>，等于把"编过哪个版本"记在 tag 上，
+  # 不需要往仓库里写状态文件，也就不会触发 push 事件形成回环。
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.upstream.outputs.sha }}
+      short_sha: ${{ steps.upstream.outputs.short_sha }}
+      branch: ${{ steps.upstream.outputs.branch }}
+      should_build: ${{ steps.decide.outputs.should_build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve upstream HEAD
+        id: upstream
+        run: |
+          . ./config/ax6.conf
+          BRANCH="${{ inputs.repo_branch }}"
+          BRANCH="${BRANCH:-$REPO_BRANCH}"
+          SHA="$(git ls-remote "$REPO_URL" "refs/heads/${BRANCH}" | cut -f1)"
+          [ -n "$SHA" ] || { echo "无法解析 ${REPO_URL} 的 ${BRANCH} 分支"; exit 1; }
+          echo "branch=${BRANCH}"        >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}"              >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHA:0:7}"    >> "$GITHUB_OUTPUT"
+          echo "上游 ${BRANCH} = ${SHA}"
+
+      - name: Decide whether to build
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # push / 手动触发一律编译：本仓库的配置或覆盖层可能变了
+          if [ "${{ github.event_name }}" != "schedule" ] || [ "${{ inputs.force_build }}" = "true" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "触发方式为 ${{ github.event_name }}，直接编译"
+            exit 0
+          fi
+
+          # tag 存在 = 这个上游 commit 已经编过。gh api 遇到 404 会返回非 0。
+          TAG="nss-${{ steps.upstream.outputs.short_sha }}"
+          if gh api "repos/${{ github.repository }}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "上游未更新（${TAG} 已发布过），跳过本次编译"
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "上游有新提交，开始编译（目标 tag ${TAG}）"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          swap-size-mb: 2048
+          temp-reserve-mb: 512
+          root-reserve-mb: 8192
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Override source branch
+        if: inputs.repo_branch != ''
+        run: |
+          sed -i "s|^REPO_BRANCH=.*|REPO_BRANCH=\"${{ inputs.repo_branch }}\"|" config/ax6.conf
+          cat config/ax6.conf
+
+      - name: Read build config
+        id: conf
+        run: |
+          . ./config/ax6.conf
+          echo "branch=${REPO_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "device=${DEVICE}" >> "$GITHUB_OUTPUT"
+
+      # CI 和本地跑的是同一个脚本、同一个容器镜像
+      - name: Build firmware
+        run: ./scripts/docker-build.sh
+
+      - name: Collect build info
+        id: info
+        run: |
+          echo "src_commit=$(git -C openwrt rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "date=$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          ls -lh output/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: redmi-ax6-nss-${{ needs.check.outputs.branch }}-${{ needs.check.outputs.short_sha }}
+          path: output/*
+          if-no-files-found: error
+
+      # tag 用上游 commit，check 那一步正是靠它判断"这个版本编过没有"。
+      # allowUpdates 让本仓库改配置后重编能覆盖同一个 tag。
+      - name: Create release
+        if: github.event_name != 'workflow_dispatch' || inputs.create_release
+        uses: ncipollo/release-action@v1
+        with:
+          name: Redmi AX6 NSS - ${{ needs.check.outputs.branch }} @ ${{ needs.check.outputs.short_sha }} (${{ steps.info.outputs.date }})
+          tag: nss-${{ needs.check.outputs.short_sha }}
+          artifacts: output/*
+          allowUpdates: true
+          replacesArtifacts: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            Redmi AX6（qualcommax/ipq807x）NSS 硬件加速固件。
+
+            - 源码：`qosmio/openwrt-ipq` @ `${{ needs.check.outputs.branch }}`（commit `${{ needs.check.outputs.sha }}`）
+            - 构建时源码树实际 commit：`${{ steps.info.outputs.src_commit }}`
+            - feeds 钉在 openwrt-25.12 发布分支，不跟 main
+            - NSS 卸载：`kmod-qca-nss-drv` / `kmod-qca-nss-ecm` / `kmod-qca-nss-drv-pppoe`
+            - 已剔除全部无线驱动、固件与 wpad
+            - 界面与系统默认中文，时区 Asia/Shanghai
+            - 额外软件包：btop / htop / iperf3 / ttyd / zsh / luci-app-ttyd
+
+            **刷机注意：从非 NSS 固件切过来必须不保留配置**，否则旧的
+            `packet_steering` / `flow_offloading` 设置会被带过来并与 NSS 冲突。
+
+            首次刷机用 `*-squashfs-factory.ubi`，后续升级用 `*-squashfs-sysupgrade.bin`。
