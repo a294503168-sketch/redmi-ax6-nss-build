@@ -48,6 +48,8 @@ files/              直接打包进固件的 rootfs 文件
   usr/libexec/rpcd/luci.sysperf    首页性能面板的后端（ubus 对象 luci.sysperf）
   usr/share/rpcd/acl.d/luci-sysperf.json          上述对象的读权限
   www/luci-static/resources/view/status/include/21_sysperf.js   首页面板前端
+patches/            本地补丁覆盖层，按相对路径覆盖上游源码树里的同名文件
+  target/linux/qualcommax/patches-6.6/0600-4-...patch   NSS ECM bonding 补丁的上下文修正版
 scripts/
   docker-build.sh   入口：起容器并调用 build.sh
   build.sh          真正的编译流程（容器内执行）
@@ -60,7 +62,7 @@ scripts/
 
 ### GitHub Actions（本机不需要 Linux）
 
-push 到 `master`（改动 `config/` `files/` `scripts/` `docker/` 或 workflow）会自动编译，
+push 到 `master`（改动 `config/` `files/` `scripts/` `docker/` `patches/` 或 workflow）会自动编译，
 产物直接挂在 Release 上。也支持定时（上游有新提交才编）与手动触发。
 
 工作流分 `check` 和 `build` 两个 job。`check` 用 `git ls-remote` 取上游分支 HEAD，
@@ -205,6 +207,14 @@ make package/libs/ncurses/clean && make package/libs/ncurses/compile
 
 **`zsh` 的并行编译已被关掉**：它的 Makefile 写了 `PKG_BUILD_PARALLEL:=1`，
 但构建系统有竞争，`-j4` / `-j2` 会反复失败。`build.sh` 每轮会把它改成 `0`。
+
+**上游内核补丁与新内核不兼容时，走 `patches/` 覆盖层。** 上游 `24.10-nss` 的
+`0600-4-qca-nss-ecm-support-net-bonding-over-LAG-interface.patch` 是按旧 `6.6.x` 写的，
+内核升到 `6.6.141` 后 `bond_3ad.c` 的 `ad_enable_collecting_distributing()` 改了形状、
+`bond_main.c` 的 `__bond_start_xmit()` switch 重排过，直接打会 `Hunk #3 FAILED` /
+`Hunk #13 FAILED`。本仓库 `patches/` 下是上下文修正版，`build.sh` 在 `make` 之前把它
+覆盖回源码树（上游 `reset --hard` 每轮都会冲掉，所以每轮重打是必须的）。
+**上游若更新了这个补丁，本仓库这份要重新对齐。**
 
 ## 默认信息
 

@@ -9,6 +9,7 @@ on:
       - 'files/**'
       - 'scripts/**'
       - 'docker/**'
+      - 'patches/**'
       - '.github/workflows/build.yml'
   # 每天 04:00（北京时间）查一次上游源码树，有新提交才编译
   schedule:

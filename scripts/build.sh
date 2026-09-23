@@ -165,6 +165,30 @@ grep -q '^# CONFIG_PACKAGE_dnsmasq is not set' "${SRC_DIR}/.config" \
 log "校验通过：OpenClash / AdGuard Home / Tailscale / ZeroTier / dnsmasq-full 均在"
 
 # ---------------------------------------------------------------
+# 5.5 本地补丁覆盖层
+#
+# 上游 24.10-nss 的 0600-4（NSS ECM bonding over LAG）是按旧 6.6.x 写的，
+# 内核升到 6.6.141 后 bond_3ad.c / bond_main.c 的上下文漂移，直接打会
+# Hunk #3 FAILED / Hunk #13 FAILED。本仓库 patches/ 下放修正版，按相对路径
+# 覆盖回源码树；上游 reset --hard 每轮都会把改动冲掉，所以每轮都必须重打。
+# 覆盖发生在 make 之前（内核补丁是在 make 里才应用的）。
+# ---------------------------------------------------------------
+PATCHES_DIR="${ROOT_DIR}/patches"
+if [ -d "$PATCHES_DIR" ]; then
+	log "应用本地补丁覆盖层"
+	OVERLAY_LIST="$(cd "$PATCHES_DIR" && find . -type f | sed 's|^\./||' | LC_ALL=C sort)"
+	while IFS= read -r rel; do
+		[ -n "$rel" ] || continue
+		[ -f "${SRC_DIR}/${rel}" ] \
+			|| die "覆盖层文件 ${rel} 在源码树里不存在，上游可能改名或删除了它"
+		cp -f "${PATCHES_DIR}/${rel}" "${SRC_DIR}/${rel}"
+		log "  覆盖 ${rel}"
+	done <<< "$OVERLAY_LIST"
+else
+	log "没有 patches/ 覆盖层，跳过"
+fi
+
+# ---------------------------------------------------------------
 # 6. 编译
 # ---------------------------------------------------------------
 log "下载源码包（-j${JOBS}）"
