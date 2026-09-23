@@ -1,4 +1,4 @@
-name: Build Redmi AX6 Firmware (NSS)
+name: Build Redmi AX6 Firmware (NSS + WiFi)
 
 on:
   push:
@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       repo_branch:
-        description: '源码分支（留空用 config/ax6.conf 的值，可填 24.10-nss）'
+        description: '源码分支（留空用 config/ax6.conf 的值，可填 24.10-nss / 25.12-nss）'
         required: false
         default: ''
       create_release:
@@ -92,14 +92,17 @@ jobs:
     needs: check
     if: needs.check.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 350
+    # 上限 6 小时（GitHub 单 job 硬上限），留 5 分钟余量。
+    # 本固件含 NSS 全量补丁 + ath11k + 两个 Go 包（AdGuardHome / Tailscale），
+    # 实测耗时明显长于无无线的精简版，所以顶到上限附近。
+    timeout-minutes: 355
 
     steps:
       # runner 的根分区只有约 14 GB 可用，而本固件全量编译（feed 全量 +
       # 自建交叉工具链 + 两个 Go 包）要 30 GB 以上。
-      # 直接删掉 runner 镜像里用不到的大件即可，不用 LVM 扩容方案：
+      # 这里直接删掉 runner 镜像里用不到的大件，不用 LVM 扩容方案：
       # easimon/maximize-build-space 的新版（loop + LVM）在当前 runner 上会把
-      # /dev/root 吃到 100%（只剩 512 MB），docker build 装依赖时 ENOSPC 失败。
+      # /dev/root 吃到 100%（只剩 512 MB），docker build 装依赖时直接 ENOSPC。
       - name: Free disk space
         run: |
           set -x
@@ -120,7 +123,7 @@ jobs:
           df -h /
           df -i /
 
-      # runner 16 GB 内存，链接阶段峰值较高，保底留 2 GB swap
+      # runner 是 16 GB 内存，链接阶段峰值较高，保底留 2 GB swap
       - name: Ensure swap
         run: |
           swapon --show || true
@@ -159,11 +162,12 @@ jobs:
           echo "src_commit=$(git -C openwrt rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           echo "date=$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
           ls -lh output/
+          du -h output/*squashfs-sysupgrade.bin || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: redmi-ax6-nss-${{ needs.check.outputs.branch }}-${{ needs.check.outputs.short_sha }}
+          name: redmi-ax6-nss-wifi-${{ needs.check.outputs.branch }}-${{ needs.check.outputs.short_sha }}
           path: output/*
           if-no-files-found: error
 
@@ -173,24 +177,28 @@ jobs:
         if: github.event_name != 'workflow_dispatch' || inputs.create_release
         uses: ncipollo/release-action@v1
         with:
-          name: Redmi AX6 NSS - ${{ needs.check.outputs.branch }} @ ${{ needs.check.outputs.short_sha }} (${{ steps.info.outputs.date }})
+          name: Redmi AX6 NSS+WiFi - ${{ needs.check.outputs.branch }} @ ${{ needs.check.outputs.short_sha }} (${{ steps.info.outputs.date }})
           tag: nss-${{ needs.check.outputs.short_sha }}
           artifacts: output/*
           allowUpdates: true
           replacesArtifacts: true
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            Redmi AX6（qualcommax/ipq807x）NSS 硬件加速固件。
+            Redmi AX6（qualcommax/ipq807x）NSS 硬件加速固件，保留 WiFi。
 
             - 源码：`qosmio/openwrt-ipq` @ `${{ needs.check.outputs.branch }}`（commit `${{ needs.check.outputs.sha }}`）
             - 构建时源码树实际 commit：`${{ steps.info.outputs.src_commit }}`
-            - feeds 钉在 openwrt-25.12 发布分支，不跟 main
-            - NSS 卸载：`kmod-qca-nss-drv` / `kmod-qca-nss-ecm` / `kmod-qca-nss-drv-pppoe`
-            - 已剔除全部无线驱动、固件与 wpad
-            - 界面与系统默认中文，时区 Asia/Shanghai
-            - 额外软件包：btop / htop / iperf3 / ttyd / zsh / luci-app-ttyd
+            - NSS 卸载：`kmod-qca-nss-drv` / `kmod-qca-nss-ecm` / `kmod-qca-nss-drv-pppoe` / `bridge-mgr` / `vlan-mgr`
+            - NSS WiFi 卸载：`ATH11K_NSS_SUPPORT` + `kmod-qca-nss-drv-wifi-meshmgr`
+            - 无线：ath11k（IPQ8074）+ 板级校准数据 + `wpad-mesh-openssl`（含 802.11k/v/r 与 Mesh）
+            - 科学上网：`luci-app-openclash`（第三方 feed `vernesong/OpenClash`）
+            - DNS 过滤：`adguardhome`（官方 packages feed，自带 Web 界面）
+            - 异地组网：`tailscale` / `zerotier`
+            - 界面与系统默认中文，时区 `Asia/Shanghai`
+            - 额外软件包：btop / htop / iperf3 / ttyd / zsh / luci-app-ttyd / curl / nano
+            - USB 存储：`kmod-usb-storage` / UAS / ext4 / vfat / `block-mount`
 
-            **刷机注意：从非 NSS 固件切过来必须不保留配置**，否则旧的
-            `packet_steering` / `flow_offloading` 设置会被带过来并与 NSS 冲突。
+            **刷机注意：从非 NSS 固件（官方 OpenWrt、ImmortalWrt 等）切过来必须不保留配置**，
+            旧的 `packet_steering` / `flow_offloading` 设置会与 NSS 的 NPU 数据面冲突。
 
             首次刷机用 `*-squashfs-factory.ubi`，后续升级用 `*-squashfs-sysupgrade.bin`。

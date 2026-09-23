@@ -16,3 +16,10 @@
 
 # 编译日志
 /build.log
+
+# local creds
+.gh-token
+.gh-device-flow.json
+
+# 本地编译产物
+firmware/

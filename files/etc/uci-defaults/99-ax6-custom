@@ -9,10 +9,6 @@ uci -q set system.@system[0].zonename='Asia/Shanghai'
 uci -q set system.@system[0].timezone='CST-8'
 uci -q commit system
 
-# ---------- 彻底关闭无线 ----------
-# 固件已剔除 ath11k 驱动与固件，这里清掉可能残留的无线配置
-rm -f /etc/config/wireless
-
 # ---------- 关闭与 NSS 冲突的软件卸载 ----------
 # NSS 走 NPU 数据面，packet steering 和 nftables flow offload 会把流量
 # 拉回 CPU，既冲突又白白丢掉硬件加速。上游 README 明确要求全部关闭。
@@ -25,13 +21,15 @@ uci -q set firewall.@defaults[0].flow_offloading_hw='0'
 uci -q commit firewall
 
 # ---------- 注释掉不存在的软件源 ----------
-# OpenWrt 会把编译时用到的每个 feed 都写进 distfeeds.list，不管上游有没有对外发布。
-# nss_packages 和 sqm_scripts_nss 是 qosmio 自己的 feed，downloads.openwrt.org 上没有，
-# 留着会让每次 apk update 报 "2 unavailable"。
-DISTFEEDS="/etc/apk/repositories.d/distfeeds.list"
-if [ -f "$DISTFEEDS" ]; then
-	sed -i -E 's|^(https?://downloads\.openwrt\.org/.*/(nss_packages\|sqm_scripts_nss)/.*)$|# \1|' "$DISTFEEDS"
-fi
+# OpenWrt 会把编译时用到的每个 feed 都写进源列表，不管上游有没有对外发布。
+# nss_packages 和 sqm_scripts_nss 是 qosmio 自己的 feed，downloads.openwrt.org
+# 上没有，留着会让每次 opkg update 报 "2 unavailable"。
+# 24.10 用 opkg（/etc/opkg/distfeeds.conf），25.12 起改用 apk，两个路径都处理一遍。
+for f in /etc/opkg/distfeeds.conf /etc/opkg/customfeeds.conf \
+         /etc/apk/repositories.d/distfeeds.list; do
+	[ -f "$f" ] || continue
+	sed -i -E 's|^(https?://downloads\.openwrt\.org/.*/(nss_packages|sqm_scripts_nss)/.*)$|# \1|' "$f"
+done
 
 # ---------- zsh 设为 root 默认 shell ----------
 ZSH_BIN="$(command -v zsh 2>/dev/null)"
@@ -39,5 +37,12 @@ if [ -n "$ZSH_BIN" ] && [ -x "$ZSH_BIN" ]; then
 	grep -q "^${ZSH_BIN}\$" /etc/shells 2>/dev/null || echo "$ZSH_BIN" >> /etc/shells
 	sed -i "/^root:/ s#:/bin/ash\$#:${ZSH_BIN}#" /etc/passwd
 fi
+
+# ---------- AdGuard Home 数据目录 ----------
+[ -d /etc/adguardhome ] || mkdir -p /etc/adguardhome
+
+# 说明：OpenClash / AdGuard Home / Tailscale / ZeroTier 只装不自动配置。
+# 它们的 DNS 接管方式互相耦合（dnsmasq / AdGuardHome / Clash 三者都可能想拿 53 端口），
+# 自动生成配置极易把 DNS 链配错导致断网，留给用户在 LuCI 与各自 Web 界面里按需接。
 
 exit 0

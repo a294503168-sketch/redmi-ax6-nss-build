@@ -96,11 +96,12 @@ function nssRows(nss) {
  * 一路一行太吵，按家族归并成几组，每组取组内最高温。 */
 var TEMP_GROUPS = [
 	[ /^(cpu|cluster)/, 'CPU 温度' ],
-	[ /^nss/,           'NSS 温度' ]
+	[ /^nss/,           'NSS 温度' ],
+	[ /^(wcss|phy)/,    'WiFi 温度' ]
 ];
 
-/* 本固件剔了无线，wcss/phy 那几路传感器没有意义，不显示 */
-var TEMP_SKIP = /^(wcss|phy|q6|lpass)/;
+/* q6 / lpass 那几路不是本机主要热源，不显示 */
+var TEMP_SKIP = /^(q6|lpass)/;
 
 function tempGroup(name) {
 	for (var i = 0; i < TEMP_GROUPS.length; i++)
